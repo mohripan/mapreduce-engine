@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/mr-core",
+    "crates/mr-executor",
+    "crates/mr-engine",
+    "crates/mr-local-fs",
+    "crates/mr-cli",
+]
