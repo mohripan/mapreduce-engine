@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 
 use mr_core::{InputRecord, Job, Key, MapReduceError, Result, Value, VecEmitter};
-
 use mr_executor::{Executor, Task, ThreadPool};
 
 pub struct InMemoryEngine;
@@ -26,34 +25,41 @@ impl InMemoryEngine {
         let mut pool = ThreadPool::new(job.num_map_workers())?;
         let mapper = job.mapper();
 
-        let (result_sender, result_receiver) = mpsc::channel::<Result<Vec<(Key, Value)>>>();
+        let (output_sender, output_receiver) = mpsc::channel::<Vec<(Key, Value)>>();
+
+        let mut handles = Vec::new();
 
         for record in records {
             let mapper = mapper.clone();
-            let result_sender = result_sender.clone();
+            let output_sender = output_sender.clone();
 
-            pool.submit(Task::new(move || {
+            let handle = pool.submit(Task::new(move || {
                 let mut emitter = VecEmitter::new();
 
-                let result = mapper
-                    .map(record, &mut emitter)
-                    .map(|_| emitter.into_outputs());
+                mapper.map(record, &mut emitter)?;
 
-                let _ = result_sender.send(result);
+                output_sender.send(emitter.into_outputs()).map_err(|_| {
+                    MapReduceError::Executor("map output receiver was dropped".to_string())
+                })?;
+
+                Ok(())
             }))?;
+
+            handles.push(handle);
         }
 
-        drop(result_sender);
+        drop(output_sender);
+
+        for handle in handles {
+            handle.wait()?;
+        }
 
         pool.shutdown()?;
 
         let mut intermediate = Vec::new();
 
-        for result in result_receiver {
-            match result {
-                Ok(mut outputs) => intermediate.append(&mut outputs),
-                Err(error) => return Err(error),
-            }
+        for mut outputs in output_receiver {
+            intermediate.append(&mut outputs);
         }
 
         Ok(intermediate)
@@ -96,39 +102,43 @@ impl InMemoryEngine {
         let mut pool = ThreadPool::new(job.num_reduce_workers())?;
         let reducer = job.reducer();
 
-        let (result_sender, result_receiver) = mpsc::channel::<Result<Vec<(Key, Value)>>>();
+        let (output_sender, output_receiver) = mpsc::channel::<Vec<(Key, Value)>>();
+
+        let mut handles = Vec::new();
 
         for partition in partitions {
             let reducer = reducer.clone();
-            let result_sender = result_sender.clone();
+            let output_sender = output_sender.clone();
 
-            pool.submit(Task::new(move || {
+            let handle = pool.submit(Task::new(move || {
                 let mut emitter = VecEmitter::new();
 
                 for (key, values) in partition {
-                    if let Err(error) = reducer.reduce(key, values, &mut emitter) {
-                        let _ = result_sender.send(Err(error));
-                        return;
-                    }
+                    reducer.reduce(key, values, &mut emitter)?;
                 }
 
-                let _ = result_sender.send(Ok(emitter.into_outputs()));
+                output_sender.send(emitter.into_outputs()).map_err(|_| {
+                    MapReduceError::Executor("reduce output receiver was dropped".to_string())
+                })?;
+
+                Ok(())
             }))?;
+
+            handles.push(handle);
         }
 
-        drop(result_sender);
+        drop(output_sender);
+
+        for handle in handles {
+            handle.wait()?;
+        }
 
         pool.shutdown()?;
 
         let mut outputs = Vec::new();
 
-        for result in result_receiver {
-            match result {
-                Ok(mut partition_outputs) => {
-                    outputs.append(&mut partition_outputs);
-                }
-                Err(error) => return Err(error),
-            }
+        for mut partition_outputs in output_receiver {
+            outputs.append(&mut partition_outputs);
         }
 
         Ok(outputs)
@@ -165,7 +175,28 @@ mod tests {
     impl Reducer for WordCountReducer {
         fn reduce(&self, key: Key, values: Vec<Value>, emitter: &mut dyn Emitter) -> Result<()> {
             emitter.emit(key, values.len().to_string());
+
             Ok(())
+        }
+    }
+
+    struct FailingMapper;
+
+    impl Mapper for FailingMapper {
+        fn map(&self, _record: InputRecord, _emitter: &mut dyn Emitter) -> Result<()> {
+            Err(MapReduceError::Map(
+                "intentional mapper failure".to_string(),
+            ))
+        }
+    }
+
+    struct FailingReducer;
+
+    impl Reducer for FailingReducer {
+        fn reduce(&self, _key: Key, _values: Vec<Value>, _emitter: &mut dyn Emitter) -> Result<()> {
+            Err(MapReduceError::Reduce(
+                "intentional reducer failure".to_string(),
+            ))
         }
     }
 
@@ -221,5 +252,57 @@ mod tests {
         let outputs = engine.run_records(&job, Vec::new()).unwrap();
 
         assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn mapper_error_fails_job() {
+        let job = Job::builder()
+            .name("failing-map")
+            .input_path("unused-input.txt")
+            .output_path("unused-output")
+            .mapper(FailingMapper)
+            .reducer(WordCountReducer)
+            .num_map_workers(2)
+            .num_reduce_workers(2)
+            .num_reducers(2)
+            .build()
+            .unwrap();
+
+        let records = vec![InputRecord::new(0, "hello rust")];
+
+        let engine = InMemoryEngine::new();
+        let result = engine.run_records(&job, records);
+
+        assert!(result.is_err());
+
+        let message = result.unwrap_err().to_string();
+
+        assert!(message.contains("intentional mapper failure"));
+    }
+
+    #[test]
+    fn reducer_error_fails_job() {
+        let job = Job::builder()
+            .name("failing-reduce")
+            .input_path("unused-input.txt")
+            .output_path("unused-output")
+            .mapper(WordCountMapper)
+            .reducer(FailingReducer)
+            .num_map_workers(2)
+            .num_reduce_workers(2)
+            .num_reducers(2)
+            .build()
+            .unwrap();
+
+        let records = vec![InputRecord::new(0, "hello rust")];
+
+        let engine = InMemoryEngine::new();
+        let result = engine.run_records(&job, records);
+
+        assert!(result.is_err());
+
+        let message = result.unwrap_err().to_string();
+
+        assert!(message.contains("intentional reducer failure"));
     }
 }

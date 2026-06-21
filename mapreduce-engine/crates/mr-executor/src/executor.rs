@@ -1,7 +1,7 @@
 use mr_core::Result;
 
-use crate::Task;
+use crate::{Task, TaskHandle};
 
 pub trait Executor: Send + Sync {
-    fn submit(&self, task: Task) -> Result<()>;
+    fn submit(&self, task: Task) -> Result<TaskHandle>;
 }

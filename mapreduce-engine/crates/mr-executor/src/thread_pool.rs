@@ -1,13 +1,14 @@
+use std::any::Any;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
 use mr_core::{MapReduceError, Result};
 
-use crate::{Executor, Task};
+use crate::{Executor, Task, TaskHandle};
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Mutex<Option<mpsc::Sender<Task>>>,
+    sender: Mutex<Option<mpsc::Sender<ScheduledTask>>>,
 }
 
 impl ThreadPool {
@@ -18,7 +19,7 @@ impl ThreadPool {
             ));
         }
 
-        let (sender, receiver) = mpsc::channel::<Task>();
+        let (sender, receiver) = mpsc::channel::<ScheduledTask>();
         let receiver = Arc::new(Mutex::new(receiver));
 
         let mut workers = Vec::with_capacity(size);
@@ -33,14 +34,16 @@ impl ThreadPool {
         })
     }
 
+    pub fn size(&self) -> usize {
+        self.workers.len()
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         {
             let mut sender_guard = self.sender.lock().map_err(|_| {
                 MapReduceError::Executor("thread pool sender lock was poisoned".to_string())
             })?;
 
-            // Dropping the sender closes the channel.
-            // Workers finish any already-queued tasks, then exit.
             sender_guard.take();
         }
 
@@ -60,7 +63,7 @@ impl ThreadPool {
 }
 
 impl Executor for ThreadPool {
-    fn submit(&self, task: Task) -> Result<()> {
+    fn submit(&self, task: Task) -> Result<TaskHandle> {
         let sender_guard = self.sender.lock().map_err(|_| {
             MapReduceError::Executor("thread pool sender lock was poisoned".to_string())
         })?;
@@ -71,11 +74,20 @@ impl Executor for ThreadPool {
             )
         })?;
 
-        sender.send(task).map_err(|_| {
+        let (completion_sender, completion_receiver) = mpsc::channel();
+
+        let scheduled_task = ScheduledTask {
+            task,
+            completion_sender,
+        };
+
+        sender.send(scheduled_task).map_err(|_| {
             MapReduceError::Executor(
                 "cannot submit task because all workers have stopped".to_string(),
             )
-        })
+        })?;
+
+        Ok(TaskHandle::new(completion_receiver))
     }
 }
 
@@ -85,21 +97,38 @@ impl Drop for ThreadPool {
     }
 }
 
+struct ScheduledTask {
+    task: Task,
+    completion_sender: mpsc::Sender<Result<()>>,
+}
+
+impl ScheduledTask {
+    fn run(self) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.task.run()))
+            .unwrap_or_else(|panic_payload| {
+                Err(MapReduceError::Executor(format!(
+                    "task panicked: {}",
+                    panic_payload_to_string(panic_payload)
+                )))
+            });
+
+        let _ = self.completion_sender.send(result);
+    }
+}
+
 struct Worker {
     id: usize,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Task>>>) -> Self {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<ScheduledTask>>>) -> Self {
         let handle = thread::spawn(move || {
             loop {
                 let task_result = {
                     let receiver = match receiver.lock() {
                         Ok(receiver) => receiver,
                         Err(_) => {
-                            // If the receiver mutex is poisoned, something went very wrong.
-                            // The safest things this worker can do is stop.
                             break;
                         }
                     };
@@ -112,7 +141,6 @@ impl Worker {
                         task.run();
                     }
                     Err(_) => {
-                        // Channel closed. Time to stop this worker.
                         break;
                     }
                 }
@@ -124,6 +152,18 @@ impl Worker {
             handle: Some(handle),
         }
     }
+}
+
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return message.to_string();
+    }
+
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+
+    "unknown panic payload".to_string()
 }
 
 #[cfg(test)]
@@ -146,24 +186,30 @@ mod tests {
     fn reports_pool_size() {
         let pool = ThreadPool::new(4).unwrap();
 
-        assert_eq!(pool.workers.len(), 4);
+        assert_eq!(pool.size(), 4);
     }
 
     #[test]
     fn executes_submitted_tasks() {
         let counter = Arc::new(AtomicUsize::new(0));
+        let pool = ThreadPool::new(4).unwrap();
+        let mut handles = Vec::new();
 
-        {
-            let pool = ThreadPool::new(4).unwrap();
+        for _ in 0..100 {
+            let counter = Arc::clone(&counter);
 
-            for _ in 0..100 {
-                let counter = Arc::clone(&counter);
-
-                pool.submit(Task::new(move || {
+            let handle = pool
+                .submit(Task::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 }))
                 .unwrap();
-            }
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.wait().unwrap();
         }
 
         assert_eq!(counter.load(Ordering::SeqCst), 100);
@@ -173,17 +219,26 @@ mod tests {
     fn shutdown_waits_for_submitted_tasks() {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut pool = ThreadPool::new(4).unwrap();
+        let mut handles = Vec::new();
 
         for _ in 0..50 {
             let counter = Arc::clone(&counter);
 
-            pool.submit(Task::new(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }))
-            .unwrap();
+            let handle = pool
+                .submit(Task::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }))
+                .unwrap();
+
+            handles.push(handle);
         }
 
         pool.shutdown().unwrap();
+
+        for handle in handles {
+            handle.wait().unwrap();
+        }
 
         assert_eq!(counter.load(Ordering::SeqCst), 50);
     }
@@ -194,8 +249,71 @@ mod tests {
 
         pool.shutdown().unwrap();
 
-        let result = pool.submit(Task::new(|| {}));
+        let result = pool.submit(Task::new(|| Ok(())));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_error_is_returned_through_handle() {
+        let pool = ThreadPool::new(2).unwrap();
+
+        let handle = pool
+            .submit(Task::new(|| {
+                Err(MapReduceError::Executor(
+                    "intentional task failure".to_string(),
+                ))
+            }))
+            .unwrap();
+
+        let result = handle.wait();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_panic_is_returned_through_handle() {
+        let pool = ThreadPool::new(2).unwrap();
+
+        let handle = pool
+            .submit(Task::new(|| {
+                panic!("intentional panic");
+            }))
+            .unwrap();
+
+        let result = handle.wait();
+
+        assert!(result.is_err());
+
+        let message = result.unwrap_err().to_string();
+
+        assert!(message.contains("intentional panic"));
+    }
+
+    #[test]
+    fn worker_survives_task_panic() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let pool = ThreadPool::new(1).unwrap();
+
+        let panic_handle = pool
+            .submit(Task::new(|| {
+                panic!("boom");
+            }))
+            .unwrap();
+
+        assert!(panic_handle.wait().is_err());
+
+        let counter_clone = Arc::clone(&counter);
+
+        let normal_handle = pool
+            .submit(Task::new(move || {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }))
+            .unwrap();
+
+        normal_handle.wait().unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

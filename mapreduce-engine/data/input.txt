@@ -1,0 +1,3 @@
+hello rust
+hello mapreduce
+rust rust
