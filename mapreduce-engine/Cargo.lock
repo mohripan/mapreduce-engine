@@ -26,6 +26,9 @@ version = "0.1.0"
 [[package]]
 name = "mr-executor"
 version = "0.1.0"
+dependencies = [
+ "mr-core",
+]
 
 [[package]]
 name = "mr-local-fs"

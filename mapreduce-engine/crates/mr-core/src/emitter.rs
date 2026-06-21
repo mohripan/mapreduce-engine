@@ -1,4 +1,4 @@
-use crate::record::{Key, Value};
+use crate::{Key, Value};
 
 pub trait Emitter {
     fn emit(&mut self, key: Key, value: Value);

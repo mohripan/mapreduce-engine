@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::{MapReduceError, Result};
-use crate::mapper::Mapper;
-use crate::partitioner::{DefaultPartitioner, Partitioner};
-use crate::reducer::Reducer;
+use crate::{
+    DefaultPartitioner, MapReduceError, Mapper, Partitioner, Reducer, Result,
+};
 
 pub struct Job {
     name: String,

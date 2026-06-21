@@ -1,7 +1,7 @@
-use crate::error::{MapReduceError, Result};
-use crate::record::Key;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+use crate::{Key, MapReduceError, Result};
 
 pub trait Partitioner: Send + Sync {
     fn partition(&self, key: &Key, reducers: usize) -> Result<usize>;
