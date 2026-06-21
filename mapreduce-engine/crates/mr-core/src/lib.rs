@@ -1,10 +1,10 @@
-pub mod error;
-pub mod record;
 pub mod emitter;
-pub mod mapper;
-pub mod reducer;
-pub mod partitioner;
+pub mod error;
 pub mod job;
+pub mod mapper;
+pub mod partitioner;
+pub mod record;
+pub mod reducer;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

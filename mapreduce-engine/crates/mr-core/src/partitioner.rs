@@ -1,8 +1,7 @@
+use crate::error::{MapReduceError, Result};
+use crate::record::Key;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use log::error;
-use crate::record::Key;
-use crate::error::{MapReduceError, Result};
 
 pub trait Partitioner: Send + Sync {
     fn partition(&self, key: &Key, reducers: usize) -> Result<usize>;
@@ -15,7 +14,7 @@ impl Partitioner for DefaultPartitioner {
     fn partition(&self, key: &Key, reducers: usize) -> Result<usize> {
         if reducers == 0 {
             return Err(MapReduceError::InvalidJobConfig(
-                "number of reducers must be greater than zero".to_string()
+                "number of reducers must be greater than zero".to_string(),
             ));
         }
 

@@ -20,7 +20,7 @@ pub enum MapReduceError {
 
 impl MapReduceError {
     pub fn io(source: std::io::Error) -> Self {
-        Self::Io {path: None, source}
+        Self::Io { path: None, source }
     }
 
     pub fn io_with_path(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
@@ -49,7 +49,7 @@ impl fmt::Display for MapReduceError {
             Self::Executor(message) => {
                 write!(f, "executor phase failed: {message}")
             }
-            Self::Io {path, source} => {
+            Self::Io { path, source } => {
                 if let Some(path) = path {
                     write!(f, "I/O error at {}: {source}", path.display())
                 } else {
@@ -63,7 +63,7 @@ impl fmt::Display for MapReduceError {
 impl Error for MapReduceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io {source, ..} => Some(source),
+            Self::Io { source, .. } => Some(source),
             _ => None,
         }
     }
