@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mr-core = { path = "../mr-core" }
+mr-engine = { path = "../mr-engine" }
+mr-local-fs = { path = "../mr-local-fs" }
