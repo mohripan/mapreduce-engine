@@ -22,6 +22,10 @@ dependencies = [
 [[package]]
 name = "mr-engine"
 version = "0.1.0"
+dependencies = [
+ "mr-core",
+ "mr-executor",
+]
 
 [[package]]
 name = "mr-executor"
